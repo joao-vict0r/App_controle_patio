@@ -704,28 +704,19 @@ class SpacesPage extends StatelessWidget {
       animation: controller,
       builder: (context, _) {
         final capacity = controller.parkingCapacity;
-        final firstEnd = (capacity * .4).ceil().clamp(1, capacity).toInt();
-        final secondEnd = (capacity * .8)
-            .ceil()
-            .clamp(firstEnd, capacity)
-            .toInt();
-        final sectors = <MapEntry<String, List<int>>>[
-          MapEntry('SETOR A', List.generate(firstEnd, (index) => index + 1)),
-          MapEntry(
-            'SETOR B',
-            List.generate(
-              secondEnd - firstEnd,
-              (index) => firstEnd + index + 1,
-            ),
-          ),
-          MapEntry(
-            'VIP',
-            List.generate(
-              capacity - secondEnd,
-              (index) => secondEnd + index + 1,
-            ),
-          ),
-        ].where((sector) => sector.value.isNotEmpty).toList();
+        var nextSpotNumber = 1;
+        final sectors = <MapEntry<String, List<int>>>[];
+        for (final entry in controller.sectorCapacities.entries) {
+          final spaces = List.generate(
+            entry.value,
+            (index) => nextSpotNumber + index,
+          );
+          if (spaces.isNotEmpty) {
+            final name = entry.key == 'VIP' ? 'VIP' : 'SETOR ${entry.key}';
+            sectors.add(MapEntry(name, spaces));
+          }
+          nextSpotNumber += entry.value;
+        }
         final occupiedBySpot = {
           for (final session in controller.openSessions)
             if (session.spotNumber != null) session.spotNumber!: session,
@@ -2982,7 +2973,7 @@ Future<void> _showRateDialog(
   final input = TextEditingController(
     text: controller.hourlyRate.toStringAsFixed(2).replaceAll('.', ','),
   );
-  await showDialog<void>(
+  final value = await showDialog<double>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: const Text('Tarifa por hora'),
@@ -3001,13 +2992,12 @@ Future<void> _showRateDialog(
         ),
         FilledButton(
           onPressed: () async {
-            final value = double.tryParse(input.text.replaceAll(',', '.'));
-            if (value == null || value <= 0) {
+            final parsed = double.tryParse(input.text.replaceAll(',', '.'));
+            if (parsed == null || parsed <= 0) {
               _showSnack(dialogContext, 'Informe um valor válido.');
               return;
             }
-            await controller.updateHourlyRate(value);
-            if (dialogContext.mounted) Navigator.pop(dialogContext);
+            Navigator.pop(dialogContext, parsed);
           },
           child: const Text('Salvar'),
         ),
@@ -3015,54 +3005,132 @@ Future<void> _showRateDialog(
     ),
   );
   input.dispose();
+  if (value == null || !context.mounted) return;
+  try {
+    await controller.updateHourlyRate(value);
+    if (context.mounted) {
+      _showSnack(context, 'Tarifa atualizada para ${_money(value)} por hora.');
+    }
+  } catch (error) {
+    if (context.mounted) _showSnack(context, _errorMessage(error));
+  }
 }
 
 Future<void> _showCapacityDialog(
   BuildContext context,
   ParkingController controller,
 ) async {
+  var selectedSector = controller.sectorCapacities.keys.first;
   final input = TextEditingController(
-    text: controller.parkingCapacity.toString(),
+    text: controller.sectorCapacities[selectedSector].toString(),
   );
-  await showDialog<void>(
+  final result = await showDialog<MapEntry<String, int>>(
     context: context,
-    builder: (dialogContext) => AlertDialog(
-      title: const Text('Capacidade do pátio'),
-      content: TextField(
-        controller: input,
-        keyboardType: TextInputType.number,
-        decoration: const InputDecoration(
-          labelText: 'Quantidade de vagas',
-          suffixText: 'vagas',
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext),
-          child: const Text('Cancelar'),
-        ),
-        FilledButton(
-          onPressed: () async {
-            final value = int.tryParse(input.text.trim());
-            if (value == null || value < 1) {
-              _showSnack(dialogContext, 'Informe uma quantidade válida.');
-              return;
-            }
-            try {
-              await controller.updateParkingCapacity(value);
-              if (dialogContext.mounted) Navigator.pop(dialogContext);
-            } catch (error) {
-              if (dialogContext.mounted) {
-                _showSnack(dialogContext, _errorMessage(error));
-              }
-            }
-          },
-          child: const Text('Salvar'),
-        ),
-      ],
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (dialogContext, setDialogState) {
+        final currentSectorCapacity =
+            controller.sectorCapacities[selectedSector] ?? 0;
+        final requestedCapacity =
+            int.tryParse(input.text.trim()) ?? currentSectorCapacity;
+        final totalAfterSave =
+            controller.parkingCapacity -
+            currentSectorCapacity +
+            requestedCapacity;
+        return AlertDialog(
+          title: const Text('Editar vagas por setor'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                initialValue: selectedSector,
+                decoration: const InputDecoration(
+                  labelText: 'Setor',
+                  prefixIcon: Icon(Icons.location_on_outlined),
+                ),
+                items: controller.sectorCapacities.keys
+                    .map(
+                      (sector) => DropdownMenuItem(
+                        value: sector,
+                        child: Text(sector == 'VIP' ? 'VIP' : 'Setor $sector'),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (sector) {
+                  if (sector == null) return;
+                  input.text = controller.sectorCapacities[sector].toString();
+                  setDialogState(() => selectedSector = sector);
+                },
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: input,
+                onChanged: (_) => setDialogState(() {}),
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Vagas neste setor',
+                  suffixText: 'vagas',
+                  prefixIcon: Icon(Icons.grid_view_rounded),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: appSurfaceRaised,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  'Total geral após salvar: $totalAfterSave vagas',
+                  style: const TextStyle(
+                    color: appGreen,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final parsed = int.tryParse(input.text.trim());
+                if (parsed == null || parsed < 0) {
+                  _showSnack(
+                    dialogContext,
+                    'Informe uma quantidade igual ou maior que zero.',
+                  );
+                  return;
+                }
+                Navigator.pop(dialogContext, MapEntry(selectedSector, parsed));
+              },
+              child: const Text('Salvar'),
+            ),
+          ],
+        );
+      },
     ),
   );
   input.dispose();
+  if (result == null || !context.mounted) return;
+  try {
+    await controller.updateSectorCapacity(
+      sector: result.key,
+      value: result.value,
+    );
+    if (context.mounted) {
+      _showSnack(
+        context,
+        'Setor ${result.key} atualizado para ${result.value} vagas. Total: ${controller.parkingCapacity}.',
+      );
+    }
+  } catch (error) {
+    if (context.mounted) _showSnack(context, _errorMessage(error));
+  }
 }
 
 String _formatDate(DateTime date) {

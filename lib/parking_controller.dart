@@ -11,12 +11,16 @@ class ParkingController extends ChangeNotifier {
   static const _partnersKey = 'parking_partners_v1';
   static const _rateKey = 'parking_hourly_rate_v1';
   static const _capacityKey = 'parking_capacity_v1';
+  static const _sectorCapacitiesKey = 'parking_sector_capacities_v1';
 
   List<ParkingSession> sessions = [];
   List<MonthlyMember> members = [];
   List<ParkingPartner> partners = [];
   double hourlyRate = 12;
-  int parkingCapacity = 20;
+  Map<String, int> sectorCapacities = {'A': 8, 'B': 8, 'VIP': 4};
+
+  int get parkingCapacity =>
+      sectorCapacities.values.fold(0, (total, value) => total + value);
 
   int get freeSpaces {
     final available = parkingCapacity - openSessions.length;
@@ -65,7 +69,19 @@ class ParkingController extends ChangeNotifier {
       ParkingPartner.fromJson,
     );
     hourlyRate = preferences.getDouble(_rateKey) ?? hourlyRate;
-    parkingCapacity = preferences.getInt(_capacityKey) ?? parkingCapacity;
+    final storedSectorCapacities = preferences.getString(_sectorCapacitiesKey);
+    if (storedSectorCapacities == null) {
+      sectorCapacities = _splitCapacity(preferences.getInt(_capacityKey) ?? 20);
+    } else {
+      final stored = Map<String, dynamic>.from(
+        jsonDecode(storedSectorCapacities) as Map,
+      );
+      sectorCapacities = {
+        'A': (stored['A'] as num?)?.toInt() ?? 0,
+        'B': (stored['B'] as num?)?.toInt() ?? 0,
+        'VIP': (stored['VIP'] as num?)?.toInt() ?? 0,
+      };
+    }
     final migratedSpots = _assignMissingSpots();
     if (migratedSpots) await _saveSessions();
     notifyListeners();
@@ -305,16 +321,28 @@ class ParkingController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> updateParkingCapacity(int value) async {
-    if (value < 1) {
-      throw ArgumentError('O estacionamento precisa ter ao menos uma vaga.');
+  Future<void> updateSectorCapacity({
+    required String sector,
+    required int value,
+  }) async {
+    if (!sectorCapacities.containsKey(sector)) {
+      throw ArgumentError('Selecione um setor válido.');
     }
-    if (openSessions.length > value) {
+    if (value < 0) {
+      throw ArgumentError('A quantidade de vagas não pode ser negativa.');
+    }
+    final updatedCapacities = Map<String, int>.from(sectorCapacities)
+      ..[sector] = value;
+    final newTotal = updatedCapacities.values.fold<int>(
+      0,
+      (total, capacity) => total + capacity,
+    );
+    if (openSessions.length > newTotal) {
       throw StateError(
         'A capacidade não pode ficar abaixo dos veículos no pátio.',
       );
     }
-    parkingCapacity = value;
+    sectorCapacities = updatedCapacities;
     final open = openSessions..sort((a, b) => a.entryAt.compareTo(b.entryAt));
     for (var index = 0; index < open.length; index++) {
       final sessionIndex = sessions.indexWhere(
@@ -327,7 +355,11 @@ class ParkingController extends ChangeNotifier {
       }
     }
     final preferences = await SharedPreferences.getInstance();
-    await preferences.setInt(_capacityKey, value);
+    await preferences.setString(
+      _sectorCapacitiesKey,
+      jsonEncode(sectorCapacities),
+    );
+    await preferences.setInt(_capacityKey, newTotal);
     await _saveSessions();
     notifyListeners();
   }
@@ -364,3 +396,13 @@ bool _isSameDay(DateTime first, DateTime second) =>
     first.year == second.year &&
     first.month == second.month &&
     first.day == second.day;
+
+Map<String, int> _splitCapacity(int total) {
+  final firstSector = (total * .4).floor();
+  final secondSector = (total * .4).floor();
+  return {
+    'A': firstSector,
+    'B': secondSector,
+    'VIP': total - firstSector - secondSector,
+  };
+}
